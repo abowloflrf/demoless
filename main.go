@@ -52,7 +52,7 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 	// }(time.Now())
 
 	if !cs.healthy {
-		ngContainer, err := dockerclient.ContainerInspect(context.Background(), demoContainer)
+		c, err := dockerclient.ContainerInspect(context.Background(), demoContainer)
 		if err != nil {
 			if client.IsErrNotFound(err) {
 				// not found
@@ -61,9 +61,9 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 				log.Fatal().Msgf("get container err: %v", err)
 			}
 		}
-		log.Debug().Msgf("State: %+v", ngContainer.State)
-		log.Debug().Msgf("Health: %+v", *ngContainer.State.Health)
-		if ngContainer.State.Status != "running" && !cs.starting {
+		log.Debug().Msgf("State: %+v", c.State)
+		log.Debug().Msgf("Health: %+v", *c.State.Health)
+		if c.State.Status != "running" && !cs.starting {
 			err := dockerclient.ContainerStart(context.Background(), demoContainer, types.ContainerStartOptions{})
 			if err != nil {
 				log.Fatal().Msgf("failed to start container: %v", err)
@@ -110,7 +110,6 @@ func WaitRunning(containerID string, timeout time.Duration) error {
 			log.Info().Msgf("waiting for container %s running timeout", containerID)
 			return errors.New("wait timeout")
 		default:
-
 			// check running
 			c, err := dockerclient.ContainerInspect(context.Background(), containerID)
 			if err != nil {
@@ -137,7 +136,6 @@ func CheckContainerRunningLoop() {
 		c, err := dockerclient.ContainerInspect(context.Background(), demoContainer)
 		if err != nil {
 			if client.IsErrNotFound(err) {
-				// not found
 				log.Fatal().Msgf("not found: %v", err)
 			} else {
 				log.Fatal().Msgf("get container err: %v", err)
