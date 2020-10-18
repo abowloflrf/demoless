@@ -36,14 +36,16 @@ func NewIngress(addr string, prov provider.ProviderType) (*IngressProxy, error) 
 		return nil, err
 	}
 	logrus.Infof("create ingress proxy with provider: %s", prov)
-	return &IngressProxy{
+	ip := &IngressProxy{
 		router: r,
 		prov:   p,
 		addr:   addr,
-	}, nil
+	}
+	ip.registerRoutes()
+	return ip, err
 }
 
-func (i *IngressProxy) RegisterRoutes() {
+func (i *IngressProxy) registerRoutes() {
 	i.router.HandleFunc("/", i.MainHandler)
 	i.router.HandleFunc("/_debug", i.DebugHandler)
 }
