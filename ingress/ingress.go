@@ -22,6 +22,7 @@ type IngressProxy struct {
 func NewIngress(addr string, prov provider.ProviderType) (*IngressProxy, error) {
 	r := mux.NewRouter()
 	// TODO: 目前只实现了docker provider
+	logrus.Infof("create ingress proxy with provider: %s", prov)
 	var p provider.Provider
 	var err error
 	switch prov {
@@ -35,7 +36,6 @@ func NewIngress(addr string, prov provider.ProviderType) (*IngressProxy, error) 
 	if err != nil {
 		return nil, err
 	}
-	logrus.Infof("create ingress proxy with provider: %s", prov)
 	ip := &IngressProxy{
 		router: r,
 		prov:   p,
@@ -52,6 +52,7 @@ func (i *IngressProxy) registerRoutes() {
 
 func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
 	// TODO: 根据request域名判断要访问的后端服务，目前demo写死
+	// TODO: access log
 	name := "nginx"
 	be, err := i.prov.Find(name)
 	if err != nil {
@@ -59,6 +60,7 @@ func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !be.Available() {
+		logrus.Infof("request with service %s, but backend is unavailable", be.ID())
 		// 且未触发解冻，即后端可用实例数为0，准备冷启动
 		if !be.Starting() {
 			err := be.Unfreeze()

@@ -10,18 +10,21 @@ import (
 )
 
 var (
-	addr string
-	prov string
+	addr  string
+	prov  string
+	level int
 )
 
 func init() {
 	flag.StringVar(&addr, "addr", ":8080", "ingress serve address")
 	flag.StringVar(&prov, "provider", "docker", "backend service provider: docker/kubernetes")
+	flag.IntVar(&level, "v", 4, "logging level 4-info 5-debug")
 	flag.Parse()
 	logrus.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp:   true,
 		TimestampFormat: time.StampMilli,
 	})
+	logrus.SetLevel(logrus.Level(level))
 }
 
 func main() {

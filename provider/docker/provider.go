@@ -15,6 +15,7 @@ import (
 )
 
 type DockerProvider struct {
+	sync.Mutex
 	client   *client.Client
 	backends []provider.Backend
 }
@@ -63,6 +64,7 @@ func (d *DockerBackend) Instance() int {
 
 // Unfreeze 将该后端服务已停止的容器启动
 func (d *DockerBackend) Unfreeze() error {
+	logrus.Infof("prepare to unfreeze service: %s", d.ID())
 	c, err := d.manager.ContainerInspect(context.Background(), d.ID())
 	if err != nil {
 		if client.IsErrNotFound(err) {
@@ -75,7 +77,15 @@ func (d *DockerBackend) Unfreeze() error {
 	}
 	logrus.Debugf("Container State: %+v", c.State)
 	logrus.Debugf("Container Health: %+v", *c.State.Health)
-	if c.State.Status != "running" && !d.Starting() {
+	if c.State.Running {
+		// 容器已经在 Running
+		d.Lock()
+		d.stateStarting = false
+		d.stateHealthy = (c.State.Health.Status == "healthy")
+		d.Unlock()
+		logrus.Infof("container %s is already running, heathy status: %s", d.ID(), c.State.Health.Status)
+	} else {
+		logrus.Infof("start container %s", d.ID())
 		// 启动容器
 		err := d.manager.ContainerStart(context.Background(), d.ID(), types.ContainerStartOptions{})
 		if err != nil {
@@ -94,7 +104,7 @@ func (d *DockerBackend) Unfreeze() error {
 func (d *DockerBackend) WaitForAvailable(timeout time.Duration) error {
 	logrus.Infof("start waiting for container %s running", d.ID())
 	if !d.Starting() {
-		return fmt.Errorf("container %s not starting", d.ID)
+		return fmt.Errorf("container %s not starting", d.ID())
 	}
 	now := time.Now()
 	for {
@@ -126,15 +136,6 @@ func (d *DockerBackend) WaitForAvailable(timeout time.Duration) error {
 	}
 }
 
-func (d *DockerProvider) Find(id string) (provider.Backend, error) {
-	for _, be := range d.backends {
-		if be.ID() == id {
-			return be, nil
-		}
-	}
-	return nil, fmt.Errorf("backend %s not found", id)
-}
-
 func NewDockerProvider(host string) (provider.Provider, error) {
 	var err error
 	var c *client.Client
@@ -146,18 +147,96 @@ func NewDockerProvider(host string) (provider.Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// TODO: 自动发现后端服务列表，目前写死一个
-	singleBackend := &DockerBackend{
-		RWMutex:       sync.RWMutex{},
-		identify:      "nginx",
-		manager:       c,
-		addr:          "127.0.0.1:8888",
-		stateHealthy:  false,
-		stateStarting: false,
-	}
-	return &DockerProvider{
+	dp := &DockerProvider{
+		Mutex:    sync.Mutex{},
 		client:   c,
-		backends: []provider.Backend{singleBackend},
-	}, nil
+		backends: []provider.Backend{},
+	}
+	if err := dp.serviceDiscovery(); err != nil {
+		logrus.Errorf("docker service discovery with error: %v", err)
+	}
+	return dp, nil
+}
+
+func (dp *DockerProvider) Find(id string) (provider.Backend, error) {
+	for _, be := range dp.backends {
+		if be.ID() == id {
+			return be, nil
+		}
+	}
+	return nil, fmt.Errorf("backend %s not found", id)
+}
+
+func (dp *DockerProvider) serviceDiscovery() error {
+	logrus.Info("discovering service...")
+	// TODO: 自动发现后端服务列表，目前写死一个
+	type svc struct {
+		name string
+		addr string
+	}
+	svcs := []svc{
+		{
+			name: "nginx",
+			addr: "http://127.0.0.1:8888",
+		},
+	}
+	for _, s := range svcs {
+		c, err := dp.client.ContainerInspect(context.Background(), s.name)
+		if err != nil {
+			logrus.Warnf("inspect container with err: %v", err)
+			continue
+		}
+		if c.State.Health == nil {
+			logrus.Warnf("service %s doesnot set healthy probe", s.name)
+		}
+		singleBackend := &DockerBackend{
+			RWMutex:       sync.RWMutex{},
+			identify:      s.name,
+			manager:       dp.client,
+			addr:          s.addr,
+			stateHealthy:  c.State.Health.Status == "healthy",
+			stateStarting: c.State.Running && c.State.Health.Status != "healthy",
+		}
+		dp.backends = append(dp.backends, singleBackend)
+		logrus.Infof("discovered service: %s@%s", s.name, s.addr)
+	}
+
+	// 后台循环检查服务可用性，避免容器意外退出导致状态不同步
+	go func(svcs []svc) {
+		for {
+			time.Sleep(1 * time.Second)
+			now := time.Now()
+			logrus.Debugf("start docker discovery")
+			backends := []provider.Backend{}
+			for _, s := range svcs {
+				c, err := dp.client.ContainerInspect(context.Background(), s.name)
+				if err != nil {
+					logrus.Warnf("inspect container with err: %v", err)
+					continue
+				}
+				if c.State.Health == nil {
+					logrus.Warnf("service %s doesnot set healthy probe", s.name)
+				}
+
+				stateHealthy := c.State.Health.Status == "healthy"
+				stateStarting := c.State.Running && c.State.Health.Status != "healthy"
+				singleBackend := &DockerBackend{
+					RWMutex:       sync.RWMutex{},
+					identify:      s.name,
+					manager:       dp.client,
+					addr:          s.addr,
+					stateHealthy:  stateHealthy,
+					stateStarting: stateStarting,
+				}
+				logrus.Debugf("discocvered service: %s, %+v, %+v", s.name, c.State, c.State.Health)
+				backends = append(backends, singleBackend)
+			}
+			dp.Lock()
+			dp.backends = backends
+			dp.Unlock()
+			logrus.Debugf("complete docker discovery: %v", time.Since(now))
+
+		}
+	}(svcs)
+	return nil
 }
