@@ -23,9 +23,9 @@ type DockerProvider struct {
 // DockerBackend docker 提供后端服务，单实例
 type DockerBackend struct {
 	sync.RWMutex
-	identify string
-	manager  *client.Client
-	addr     string
+	name    string
+	manager *client.Client
+	addr    string
 
 	// 后端实例健康，可转发请求
 	stateHealthy bool
@@ -34,7 +34,7 @@ type DockerBackend struct {
 }
 
 func (d *DockerBackend) ID() string {
-	return d.identify
+	return d.name
 }
 
 func (d *DockerBackend) Addr() *url.URL {
@@ -81,7 +81,7 @@ func (d *DockerBackend) Unfreeze() error {
 		// 容器已经在 Running
 		d.Lock()
 		d.stateStarting = false
-		d.stateHealthy = (c.State.Health.Status == "healthy")
+		d.stateHealthy = c.State.Health.Status == "healthy"
 		d.Unlock()
 		logrus.Infof("container %s is already running, heathy status: %s", d.ID(), c.State.Health.Status)
 	} else {
@@ -191,7 +191,7 @@ func (dp *DockerProvider) serviceDiscovery() error {
 		}
 		singleBackend := &DockerBackend{
 			RWMutex:       sync.RWMutex{},
-			identify:      s.name,
+			name:          s.name,
 			manager:       dp.client,
 			addr:          s.addr,
 			stateHealthy:  c.State.Health.Status == "healthy",
@@ -222,7 +222,7 @@ func (dp *DockerProvider) serviceDiscovery() error {
 				stateStarting := c.State.Running && c.State.Health.Status != "healthy"
 				singleBackend := &DockerBackend{
 					RWMutex:       sync.RWMutex{},
-					identify:      s.name,
+					name:          s.name,
 					manager:       dp.client,
 					addr:          s.addr,
 					stateHealthy:  stateHealthy,

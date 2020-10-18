@@ -3,6 +3,7 @@ package ingress
 import (
 	"demoless/provider"
 	"demoless/provider/docker"
+	"demoless/provider/kube"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,7 +30,7 @@ func NewIngress(addr string, prov provider.ProviderType) (*IngressProxy, error) 
 	case provider.ProviderTypeDocker:
 		p, err = docker.NewDockerProvider("")
 	case provider.ProviderTypeKube:
-		err = fmt.Errorf("provider %s not implement", prov)
+		p, err = kube.NewKubeProvider("default")
 	default:
 		err = fmt.Errorf("provider %s not implement", prov)
 	}
