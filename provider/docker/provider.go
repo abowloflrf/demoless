@@ -150,6 +150,7 @@ func NewDockerProvider(host string) (provider.Provider, error) {
 	// TODO: 自动发现后端服务列表，目前写死一个
 	singleBackend := &DockerBackend{
 		RWMutex:       sync.RWMutex{},
+		identify:      "nginx",
 		manager:       c,
 		addr:          "127.0.0.1:8888",
 		stateHealthy:  false,
