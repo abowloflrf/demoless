@@ -8,15 +8,13 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
 	"github.com/gorilla/mux"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
+	"github.com/sirupsen/logrus"
 )
 
 var dockerclient *client.Client
@@ -33,40 +31,33 @@ var cs containerState
 func init() {
 	flag.StringVar(&demoContainer, "c", "nginx", "container name")
 	flag.Parse()
-	zerolog.TimeFieldFormat = time.RFC3339Nano
-	log.Logger = log.Output(zerolog.ConsoleWriter{
-		Out: os.Stderr,
+	logrus.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp:   true,
+		TimestampFormat: time.StampMilli,
 	})
-	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	var err error
 	dockerclient, err = client.NewClientWithOpts(client.FromEnv)
 	if err != nil {
-		log.Fatal().Msgf("error create client %v", err)
+		logrus.Fatalf("error create client: %v", err)
 	}
 }
 
 func IndexHandler(w http.ResponseWriter, r *http.Request) {
-	// log.Info().Msgf("get request")
-	// defer func(start time.Time) {
-	// 	log.Info().Msgf("request processed: %v", time.Since(start))
-	// }(time.Now())
-
 	if !cs.healthy {
 		c, err := dockerclient.ContainerInspect(context.Background(), demoContainer)
 		if err != nil {
 			if client.IsErrNotFound(err) {
-				// not found
-				log.Fatal().Msgf("not found: %v", err)
+				logrus.Infof("not found: %v", err)
 			} else {
-				log.Fatal().Msgf("get container err: %v", err)
+				logrus.Fatalf("get container err: %v", err)
 			}
 		}
-		log.Debug().Msgf("State: %+v", c.State)
-		log.Debug().Msgf("Health: %+v", *c.State.Health)
+		logrus.Debugf("Container State: %+v", c.State)
+		logrus.Debugf("Container Health: %+v", *c.State.Health)
 		if c.State.Status != "running" && !cs.starting {
 			err := dockerclient.ContainerStart(context.Background(), demoContainer, types.ContainerStartOptions{})
 			if err != nil {
-				log.Fatal().Msgf("failed to start container: %v", err)
+				logrus.Fatalf("failed to start container: %v", err)
 			}
 
 			cs.Lock()
@@ -74,7 +65,7 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 			cs.Unlock()
 
 			if err := WaitRunning(demoContainer, time.Second*10); err != nil {
-				log.Fatal().Msgf("wait err: %v", err)
+				logrus.Fatalf("wait err: %v", err)
 			}
 		}
 
@@ -91,7 +82,7 @@ func IndexHandler(w http.ResponseWriter, r *http.Request) {
 	backend := "http://127.0.0.1:8888"
 	backendURL, err := url.Parse(backend)
 	if err != nil {
-		log.Warn().Msgf("parse url err %v", err)
+		logrus.Warnf("parse url err: %v", err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(backendURL)
 	proxy.ServeHTTP(w, r)
@@ -102,24 +93,24 @@ func FooHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func WaitRunning(containerID string, timeout time.Duration) error {
-	log.Info().Msgf("start waiting for container %s running", containerID)
+	logrus.Infof("start waiting for container %s running", containerID)
 	now := time.Now()
 	for {
 		select {
 		case <-time.After(timeout):
-			log.Info().Msgf("waiting for container %s running timeout", containerID)
+			logrus.Infof("waiting for container %s running timeout", containerID)
 			return errors.New("wait timeout")
 		default:
 			// check running
 			c, err := dockerclient.ContainerInspect(context.Background(), containerID)
 			if err != nil {
-				log.Warn().Msgf("get container %s with err: %v", containerID, err)
+				logrus.Warnf("get container %s with err: %v", containerID, err)
 				return err
 			}
-			log.Debug().Msgf("State: %+v", c.State)
-			log.Debug().Msgf("Health: %+v", *c.State.Health)
+			logrus.Debugf("Container State: %+v", c.State)
+			logrus.Debugf("Container Health: %+v", *c.State.Health)
 			if c.State.Running && c.State.Health.Status == "healthy" {
-				log.Info().Msgf("container %s is running, %v", containerID, time.Since(now))
+				logrus.Infof("container %s is running, %v", containerID, time.Since(now))
 				cs.Lock()
 				cs.healthy = true
 				cs.starting = false
@@ -136,9 +127,9 @@ func CheckContainerRunningLoop() {
 		c, err := dockerclient.ContainerInspect(context.Background(), demoContainer)
 		if err != nil {
 			if client.IsErrNotFound(err) {
-				log.Fatal().Msgf("not found: %v", err)
+				logrus.Fatalf("not found: %v", err)
 			} else {
-				log.Fatal().Msgf("get container err: %v", err)
+				logrus.Fatalf("get container err: %v", err)
 			}
 		}
 		if c.State.Status == "running" && c.State.Health.Status == "healthy" {
