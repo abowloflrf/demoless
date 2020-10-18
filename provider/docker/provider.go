@@ -17,7 +17,7 @@ import (
 type DockerProvider struct {
 	sync.Mutex
 	client   *client.Client
-	backends []provider.Backend
+	backends map[string]*DockerBackend
 }
 
 // DockerBackend docker 提供后端服务，单实例
@@ -147,10 +147,14 @@ func NewDockerProvider(host string) (provider.Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	_, err = c.Ping(context.Background())
+	if err != nil {
+		return nil, err
+	}
 	dp := &DockerProvider{
 		Mutex:    sync.Mutex{},
 		client:   c,
-		backends: []provider.Backend{},
+		backends: make(map[string]*DockerBackend),
 	}
 	if err := dp.serviceDiscovery(); err != nil {
 		logrus.Errorf("docker service discovery with error: %v", err)
@@ -197,7 +201,7 @@ func (dp *DockerProvider) serviceDiscovery() error {
 			stateHealthy:  c.State.Health.Status == "healthy",
 			stateStarting: c.State.Running && c.State.Health.Status != "healthy",
 		}
-		dp.backends = append(dp.backends, singleBackend)
+		dp.backends[s.name] = singleBackend
 		logrus.Infof("discovered service: %s@%s", s.name, s.addr)
 	}
 
@@ -207,7 +211,7 @@ func (dp *DockerProvider) serviceDiscovery() error {
 			time.Sleep(1 * time.Second)
 			now := time.Now()
 			logrus.Debugf("start docker discovery")
-			backends := []provider.Backend{}
+			backends := make(map[string]*DockerBackend)
 			for _, s := range svcs {
 				c, err := dp.client.ContainerInspect(context.Background(), s.name)
 				if err != nil {
@@ -229,7 +233,7 @@ func (dp *DockerProvider) serviceDiscovery() error {
 					stateStarting: stateStarting,
 				}
 				logrus.Debugf("discocvered service: %s, %+v, %+v", s.name, c.State, c.State.Health)
-				backends = append(backends, singleBackend)
+				backends[s.name] = singleBackend
 			}
 			dp.Lock()
 			dp.backends = backends
