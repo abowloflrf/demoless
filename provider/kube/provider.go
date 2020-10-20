@@ -133,11 +133,11 @@ func (kp *KubeProvider) ServiceDiscovery(stop chan struct{}) error {
 	// register event handler
 	svcHandlerFunc := func(obj interface{}) {
 		service := obj.(corev1.Service)
-		app, ok := service.Labels["app"]
-		if !ok || app != service.Name {
-			return
+		app := service.Labels["app"]
+		appAnno := service.Annotations[annotationKey]
+		if app == appAnno && appAnno != "" {
+			kp.sycnBackendsQueue.Add(app)
 		}
-		kp.sycnBackendsQueue.Add(app)
 	}
 	kp.si.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -152,11 +152,11 @@ func (kp *KubeProvider) ServiceDiscovery(stop chan struct{}) error {
 	})
 	deployHandlerFunc := func(obj interface{}) {
 		deploy := obj.(appsv1.Deployment)
-		app, ok := deploy.Labels["app"]
-		if !ok || app != deploy.Name {
-			return
+		app := deploy.Labels["app"]
+		appAnno := deploy.Annotations[annotationKey]
+		if app == appAnno && appAnno != "" {
+			kp.sycnBackendsQueue.Add(app)
 		}
-		kp.sycnBackendsQueue.Add(app)
 	}
 	kp.di.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -171,11 +171,11 @@ func (kp *KubeProvider) ServiceDiscovery(stop chan struct{}) error {
 	})
 	podHandlerFunc := func(obj interface{}) {
 		pod := obj.(corev1.Pod)
-		app, ok := pod.Labels["app"]
-		if !ok || app != pod.Name {
-			return
+		app := pod.Labels["app"]
+		appAnno := pod.Annotations[annotationKey]
+		if app == appAnno && appAnno != "" {
+			kp.sycnBackendsQueue.Add(app)
 		}
-		kp.sycnBackendsQueue.Add(app)
 	}
 	kp.pi.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -220,7 +220,9 @@ func (kp *KubeProvider) processSyncItem() bool {
 // 若其关联资源有问题则从backends map中删除此app
 // 每次pod/service/deployment资源变化都会执行此方法
 func (kp *KubeProvider) syncBackend(app string) error {
+	now := time.Now()
 	defer func() {
+		logrus.Infof("sync app %s, duration %v", app, time.Since(now))
 		if be, ok := kp.backends[app]; ok {
 			be.cond.Broadcast()
 		}
@@ -251,10 +253,12 @@ func (kp *KubeProvider) syncBackend(app string) error {
 		for _, cond := range pod.Status.Conditions {
 			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
 				ready = true
+				break
 			}
 		}
 		if ready {
 			stateHealthy = true
+			break
 		}
 	}
 	if len(pods) != 0 && !stateHealthy {
@@ -268,7 +272,8 @@ func (kp *KubeProvider) syncBackend(app string) error {
 		kp.removeBackend(app)
 		return err
 	}
-	u, err := url.Parse(service.Spec.ClusterIP)
+	// 直接请求 Service Name
+	u, err := url.Parse("http://" + service.Name)
 	if err != nil {
 		logrus.Warnf("parse service %s IP err: %v", app, err)
 		kp.removeBackend(app)
