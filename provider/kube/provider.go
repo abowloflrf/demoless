@@ -90,6 +90,10 @@ func NewKubeProvider(namespace string) provider.Provider {
 	return kp
 }
 
+func (kp *KubeProvider) Name() provider.ProviderType {
+	return provider.ProviderTypeKube
+}
+
 func (kp *KubeProvider) Run(stop chan struct{}) error {
 	logrus.Info("starting informer")
 	now := time.Now()

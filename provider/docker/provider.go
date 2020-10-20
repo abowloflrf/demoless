@@ -161,6 +161,10 @@ func NewDockerProvider(host string) provider.Provider {
 	return dp
 }
 
+func (dp *DockerProvider) Name() provider.ProviderType {
+	return provider.ProviderTypeDocker
+}
+
 func (dp *DockerProvider) Run(stop chan struct{}) error {
 	_, err := dp.client.Ping(context.Background())
 	if err != nil {

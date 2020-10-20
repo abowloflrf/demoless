@@ -90,25 +90,17 @@ func (i *IngressProxy) registerRoutes() {
 
 	// ingress route
 	ingressRoute := i.router.Host("demoless.app").Subrouter()
-	ingressRoute.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "hello from index of demoless ingress")
-	})
+	ingressRoute.HandleFunc("/", i.IngressIndexHandler)
 	ingressRoute.HandleFunc("/debug", i.DebugHandler)
 }
 
-func (i *IngressProxy) IngressIndexHandler(w http.ResponseWriter, r *http.Request) {
-	RespJSON(w, R{"app": "ingress", "provider": i.prov})
-}
-
 func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO: 根据request域名判断要访问的后端服务，目前demo写死
 	app := mux.Vars(r)["app"]
-	logrus.Infof("request from [%s], %s", app, r.RequestURI)
 	RespJSON(w, R{"app": app})
 	return
 
-	name := "nginx"
-	be, err := i.prov.Find(name)
+	// TODO: 根据request域名判断要访问的后端服务，目前demo写死
+	be, err := i.prov.Find(app)
 	if err != nil {
 		RespErr(w, fmt.Sprintf("service not found: %v", err), http.StatusNotFound)
 		return
@@ -132,6 +124,10 @@ func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(be.Addr())
 	proxy.ServeHTTP(w, r)
+}
+
+func (i *IngressProxy) IngressIndexHandler(w http.ResponseWriter, r *http.Request) {
+	RespJSON(w, R{"app": "ingress", "provider": i.prov.Name()})
 }
 
 func (i *IngressProxy) DebugHandler(w http.ResponseWriter, r *http.Request) {
