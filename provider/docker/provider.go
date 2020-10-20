@@ -18,6 +18,7 @@ type DockerProvider struct {
 	sync.Mutex
 	client   *client.Client
 	backends map[string]*DockerBackend
+	stop     chan struct{}
 }
 
 // DockerBackend docker 提供后端服务，单实例
@@ -136,7 +137,7 @@ func (d *DockerBackend) WaitForAvailable(timeout time.Duration) error {
 	}
 }
 
-func NewDockerProvider(host string) (provider.Provider, error) {
+func NewDockerProvider(host string) provider.Provider {
 	var err error
 	var c *client.Client
 	if host != "" {
@@ -145,21 +146,30 @@ func NewDockerProvider(host string) (provider.Provider, error) {
 		c, err = client.NewClientWithOpts(client.FromEnv)
 	}
 	if err != nil {
-		return nil, err
-	}
-	_, err = c.Ping(context.Background())
-	if err != nil {
-		return nil, err
+		logrus.Fatalf("create docker client err: %v", err)
+		return nil
 	}
 	dp := &DockerProvider{
 		Mutex:    sync.Mutex{},
 		client:   c,
 		backends: make(map[string]*DockerBackend),
 	}
-	if err := dp.serviceDiscovery(); err != nil {
+	stop := make(chan struct{})
+	if err := dp.ServiceDiscovery(stop); err != nil {
 		logrus.Errorf("docker service discovery with error: %v", err)
 	}
-	return dp, nil
+	return dp
+}
+
+func (dp *DockerProvider) Run(stop chan struct{}) error {
+	_, err := dp.client.Ping(context.Background())
+	if err != nil {
+		return err
+	}
+	if err := dp.ServiceDiscovery(stop); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (dp *DockerProvider) Find(id string) (provider.Backend, error) {
@@ -171,7 +181,7 @@ func (dp *DockerProvider) Find(id string) (provider.Backend, error) {
 	return nil, fmt.Errorf("backend %s not found", id)
 }
 
-func (dp *DockerProvider) serviceDiscovery() error {
+func (dp *DockerProvider) ServiceDiscovery(stop chan struct{}) error {
 	logrus.Info("discovering service...")
 	// TODO: 自动发现后端服务列表，目前写死一个
 	type svc struct {
@@ -239,8 +249,10 @@ func (dp *DockerProvider) serviceDiscovery() error {
 			dp.backends = backends
 			dp.Unlock()
 			logrus.Debugf("complete docker discovery: %v", time.Since(now))
-
 		}
 	}(svcs)
+
+	<-stop
+	logrus.Info("shutting down docker sd")
 	return nil
 }

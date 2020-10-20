@@ -48,10 +48,11 @@ func getClientSet() (*kubernetes.Clientset, error) {
 
 type KubeProvider struct {
 	sync.RWMutex
-	client kubernetes.Interface
-	si     coreinformers.ServiceInformer
-	pi     coreinformers.PodInformer
-	di     appsinformers.DeploymentInformer
+	client          kubernetes.Interface
+	informerFactory informers.SharedInformerFactory
+	si              coreinformers.ServiceInformer
+	pi              coreinformers.PodInformer
+	di              appsinformers.DeploymentInformer
 
 	namespace         string
 	sycnBackendsQueue workqueue.Interface
@@ -69,18 +70,16 @@ type KubeBackend struct {
 	stateStarting bool     // Deployment 下实例数非0，且还没有ready的Pod
 }
 
-func NewKubeProvider(namespace string) (provider.Provider, error) {
+func NewKubeProvider(namespace string) provider.Provider {
 	clientset, err := getClientSet()
 	if err != nil {
-		logrus.Errorf("failed to get k8s clientset: %v", err)
-		return nil, err
+		logrus.Fatalf("failed to get k8s clientset: %v", err)
+		return nil
 	}
-	logrus.Info("starting informer")
-	now := time.Now()
 	informerFactory := informers.NewSharedInformerFactory(clientset, 0)
-	stop := make(chan struct{})
 	kp := &KubeProvider{
 		client:            clientset,
+		informerFactory:   informerFactory,
 		si:                informerFactory.Core().V1().Services(),
 		pi:                informerFactory.Core().V1().Pods(),
 		di:                informerFactory.Apps().V1().Deployments(),
@@ -88,17 +87,24 @@ func NewKubeProvider(namespace string) (provider.Provider, error) {
 		backends:          make(map[string]*KubeBackend),
 		sycnBackendsQueue: workqueue.New(),
 	}
+	return kp
+}
+
+func (kp *KubeProvider) Run(stop chan struct{}) error {
+	logrus.Info("starting informer")
+	now := time.Now()
 	go kp.si.Informer().Run(stop)
 	go kp.pi.Informer().Run(stop)
 	go kp.di.Informer().Run(stop)
+	logrus.Info("wait for informer cache sync")
 	if !cache.WaitForCacheSync(stop, kp.si.Informer().HasSynced, kp.pi.Informer().HasSynced, kp.di.Informer().HasSynced) {
-		return nil, errors.New("wait for informer cache sync error")
+		return errors.New("failed to sync informer cache")
 	}
 	logrus.Infof("informer cache synced, duration: %v", time.Since(now))
-	if err := kp.serviceDiscovery(); err != nil {
+	if err := kp.ServiceDiscovery(stop); err != nil {
 		logrus.Errorf("start kubernetes service discovery with error: %v", err)
 	}
-	return kp, nil
+	return nil
 }
 
 func (kp *KubeProvider) Find(id string) (provider.Backend, error) {
@@ -111,7 +117,7 @@ func (kp *KubeProvider) Find(id string) (provider.Backend, error) {
 	return be, nil
 }
 
-func (kp *KubeProvider) serviceDiscovery() error {
+func (kp *KubeProvider) ServiceDiscovery(stop chan struct{}) error {
 	// TODO: 自动发现后端服务列表，目前写死一个
 	// init
 	apps := []string{"demoapp"}
@@ -178,14 +184,16 @@ func (kp *KubeProvider) serviceDiscovery() error {
 			podHandlerFunc(obj)
 		},
 	})
-	workers := 5
-	for i := 0; i < workers; i++ {
-		go wait.Forever(func() {
+	logrus.Infof("start k8s sd workers")
+	for i := 0; i < 5; i++ {
+		go wait.Until(func() {
 			for kp.processSyncItem() {
-
 			}
-		}, 1*time.Second)
+		}, 1*time.Second, stop)
 	}
+
+	<-stop
+	logrus.Infof("shutting down k8s sd workers")
 
 	return nil
 }

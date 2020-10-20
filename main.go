@@ -3,36 +3,51 @@ package main
 import (
 	"demoless/ingress"
 	"demoless/provider"
-	"flag"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/pflag"
 )
 
 var (
-	addr  string
-	prov  string
-	level int
+	port  = pflag.IntP("port", "p", 8080, "ingress listen port")
+	prov  = pflag.String("provider", "docker", "backend service provider: docker/kubernetes")
+	level = pflag.IntP("level", "v", 4, "logging level 4-info 5-debug")
 )
 
 func init() {
-	flag.StringVar(&addr, "addr", ":8080", "ingress serve address")
-	flag.StringVar(&prov, "provider", "docker", "backend service provider: docker/kubernetes")
-	flag.IntVar(&level, "v", 4, "logging level 4-info 5-debug")
-	flag.Parse()
+	pflag.Parse()
 	logrus.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp:   true,
 		TimestampFormat: time.StampMilli,
 	})
-	logrus.SetLevel(logrus.Level(level))
+	logrus.SetLevel(logrus.Level(*level))
 }
 
 func main() {
-	i, err := ingress.NewIngress(addr, provider.ProviderType(prov))
+	// 初始化 ingress 实例
+	i, err := ingress.NewIngress(*port, provider.ProviderType(*prov))
 	if err != nil {
 		logrus.Fatalf("create ingress proxy with err: %v", err)
 	}
-	err = i.Run()
+
+	// 设置优雅退出信号
+	stopCh := make(chan struct{})
+	c := make(chan os.Signal, 2)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		s := <-c
+		logrus.Infof("gracefully shutdown: %v", s)
+		close(stopCh)
+		<-c
+		logrus.Fatal("force exit with code 1")
+	}()
+
+	// 开启运行
+	err = i.Run(stopCh)
 	if err != nil {
 		logrus.Fatalf("start ingress proxy with err: %v", err)
 	}

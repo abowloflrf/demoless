@@ -13,7 +13,12 @@ const (
 )
 
 type Provider interface {
+	// Find 查询后端服务
 	Find(id string) (Backend, error)
+	// Run 启动 provider 后台服务，包括服务发现
+	Run(stop chan struct{}) error
+	// ServiceDiscovery 运行服务发现
+	ServiceDiscovery(chan struct{}) error
 }
 
 type Backend interface {

@@ -4,33 +4,59 @@ import (
 	"demoless/provider"
 	"demoless/provider/docker"
 	"demoless/provider/kube"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httputil"
+	"os"
+	"strconv"
 	"time"
 
+	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
 
 type IngressProxy struct {
-	router *mux.Router
-	addr   string
-	prov   provider.Provider
+	router     *mux.Router
+	httpserver *http.Server
+	port       int
+	prov       provider.Provider
+	stop       chan struct{}
 }
 
-func NewIngress(addr string, prov provider.ProviderType) (*IngressProxy, error) {
+func NewIngress(port int, prov provider.ProviderType) (*IngressProxy, error) {
+	logrus.Infof("create ingress proxy mux router")
+	var handler http.Handler
 	r := mux.NewRouter()
-	// TODO: 目前只实现了docker provider
+	// 转发 header
+	handler = r
+	handler = handlers.ProxyHeaders(handler)
+	// 记录 access log
+	handler = handlers.CustomLoggingHandler(os.Stdout, handler, func(_ io.Writer, params handlers.LogFormatterParams) {
+		uri := params.Request.RequestURI
+		if uri == "" {
+			uri = params.URL.RequestURI()
+		}
+		logrus.Infof("\"%s %s %s %s\" %d %d \"%s\" \"%s\"",
+			params.Request.Method, params.Request.Host, uri, params.Request.Proto,
+			params.StatusCode, params.Size,
+			params.Request.Referer(), params.Request.UserAgent(),
+		)
+	})
+
+	// 初始化 provider
+	stop := make(chan struct{})
 	logrus.Infof("create ingress proxy with provider: %s", prov)
 	var p provider.Provider
 	var err error
 	switch prov {
 	case provider.ProviderTypeDocker:
-		p, err = docker.NewDockerProvider("")
+		p = docker.NewDockerProvider("")
 	case provider.ProviderTypeKube:
-		p, err = kube.NewKubeProvider("default")
+		p = kube.NewKubeProvider("default")
 	default:
 		err = fmt.Errorf("provider %s not implement", prov)
 	}
@@ -40,20 +66,47 @@ func NewIngress(addr string, prov provider.ProviderType) (*IngressProxy, error) 
 	ip := &IngressProxy{
 		router: r,
 		prov:   p,
-		addr:   addr,
+		port:   port,
+		stop:   stop,
+
+		httpserver: &http.Server{
+			Addr:         "0.0.0.0:" + strconv.Itoa(port),
+			WriteTimeout: time.Second * 15,
+			ReadTimeout:  time.Second * 15,
+			IdleTimeout:  time.Second * 60,
+			Handler:      handler,
+		},
 	}
+
+	// 注册路由
 	ip.registerRoutes()
 	return ip, err
 }
 
 func (i *IngressProxy) registerRoutes() {
-	i.router.HandleFunc("/", i.MainHandler)
-	i.router.HandleFunc("/_debug", i.DebugHandler)
+	// app route
+	appRoute := i.router.Host("{app}.demoless.app")
+	appRoute.HandlerFunc(i.MainHandler)
+
+	// ingress route
+	ingressRoute := i.router.Host("demoless.app").Subrouter()
+	ingressRoute.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "hello from index of demoless ingress")
+	})
+	ingressRoute.HandleFunc("/debug", i.DebugHandler)
+}
+
+func (i *IngressProxy) IngressIndexHandler(w http.ResponseWriter, r *http.Request) {
+	RespJSON(w, R{"app": "ingress", "provider": i.prov})
 }
 
 func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
 	// TODO: 根据request域名判断要访问的后端服务，目前demo写死
-	// TODO: access log
+	app := mux.Vars(r)["app"]
+	logrus.Infof("request from [%s], %s", app, r.RequestURI)
+	RespJSON(w, R{"app": app})
+	return
+
 	name := "nginx"
 	be, err := i.prov.Find(name)
 	if err != nil {
@@ -82,10 +135,20 @@ func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (i *IngressProxy) DebugHandler(w http.ResponseWriter, r *http.Request) {
-	io.WriteString(w, "debug")
+	RespJSON(w, R{"debug": true})
 }
 
-func (i *IngressProxy) Run() error {
-	logrus.Infof("ingress proxy serve on: %s", i.addr)
-	return http.ListenAndServe(i.addr, i.router)
+func (i *IngressProxy) Run(stop chan struct{}) error {
+	go func() {
+		if err := i.prov.Run(stop); err != nil {
+			log.Fatalf("run provider with error: %v", err)
+		}
+	}()
+
+	logrus.Infof("starting ingress proxy server on %s", i.httpserver.Addr)
+	err := i.httpserver.ListenAndServe()
+	if err != nil && errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return i.httpserver.ListenAndServe()
 }
