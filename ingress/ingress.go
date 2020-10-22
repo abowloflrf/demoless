@@ -1,6 +1,8 @@
 package ingress
 
 import (
+	"context"
+	"demoless/metrics"
 	"demoless/provider"
 	"demoless/provider/docker"
 	"demoless/provider/kube"
@@ -10,12 +12,14 @@ import (
 	"log"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 )
 
@@ -23,11 +27,13 @@ type IngressProxy struct {
 	router     *mux.Router
 	httpserver *http.Server
 	port       int
+	timout     time.Duration
 	prov       provider.Provider
-	stop       chan struct{}
+
+	promMetrics *metrics.MetricsStorage
 }
 
-func NewIngress(port int, prov provider.ProviderType) (*IngressProxy, error) {
+func NewIngress(port int, timeout time.Duration, prov provider.ProviderType) (*IngressProxy, error) {
 	logrus.Infof("create ingress proxy mux router")
 	var handler http.Handler
 	r := mux.NewRouter()
@@ -48,7 +54,6 @@ func NewIngress(port int, prov provider.ProviderType) (*IngressProxy, error) {
 	})
 
 	// 初始化 provider
-	stop := make(chan struct{})
 	logrus.Infof("create ingress proxy with provider: %s", prov)
 	var p provider.Provider
 	var err error
@@ -67,7 +72,7 @@ func NewIngress(port int, prov provider.ProviderType) (*IngressProxy, error) {
 		router: r,
 		prov:   p,
 		port:   port,
-		stop:   stop,
+		timout: timeout,
 
 		httpserver: &http.Server{
 			Addr:         "0.0.0.0:" + strconv.Itoa(port),
@@ -76,6 +81,7 @@ func NewIngress(port int, prov provider.ProviderType) (*IngressProxy, error) {
 			IdleTimeout:  time.Second * 60,
 			Handler:      handler,
 		},
+		promMetrics: metrics.New(),
 	}
 
 	// 注册路由
@@ -92,21 +98,21 @@ func (i *IngressProxy) registerRoutes() {
 	ingressRoute := i.router.Host("demoless.app").Subrouter()
 	ingressRoute.HandleFunc("/", i.IngressIndexHandler)
 	ingressRoute.HandleFunc("/debug", i.DebugHandler)
+	ingressRoute.Handle("/metrics", promhttp.Handler())
 }
 
 func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	app := mux.Vars(r)["app"]
-	RespJSON(w, R{"app": app})
-	return
-
-	// TODO: 根据request域名判断要访问的后端服务，目前demo写死
 	be, err := i.prov.Find(app)
 	if err != nil {
 		RespErr(w, fmt.Sprintf("service not found: %v", err), http.StatusNotFound)
 		return
 	}
+	time.Sleep(100 * time.Millisecond)
+	i.promMetrics.HTTPRequestCount.WithLabelValues(app).Inc()
 	if !be.Available() {
-		logrus.Infof("request with service %s, but backend is unavailable", be.ID())
+		now := time.Now()
 		// 且未触发解冻，即后端可用实例数为0，准备冷启动
 		if !be.Starting() {
 			err := be.Unfreeze()
@@ -116,14 +122,18 @@ func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// 等待后端实例冷启动完毕
-		err := be.WaitForAvailable(10 * time.Second)
+		err := be.WaitForAvailable(i.timout)
 		if err != nil {
-			RespErr(w, err.Error(), http.StatusBadGateway)
+			RespErr(w, err.Error(), http.StatusGatewayTimeout)
 			return
 		}
+		logrus.Infof("finish waiting for service %s available, %v", app, time.Since(now))
 	}
 	proxy := httputil.NewSingleHostReverseProxy(be.Addr())
 	proxy.ServeHTTP(w, r)
+
+	elapsed := (float64)(time.Since(start) / time.Millisecond)
+	i.promMetrics.HTTPRequestMilliseconds.WithLabelValues(app).Observe(elapsed)
 }
 
 func (i *IngressProxy) IngressIndexHandler(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +141,25 @@ func (i *IngressProxy) IngressIndexHandler(w http.ResponseWriter, r *http.Reques
 }
 
 func (i *IngressProxy) DebugHandler(w http.ResponseWriter, r *http.Request) {
-	RespJSON(w, R{"debug": true})
+	type appinfo struct {
+		Name     string
+		Instance int
+		Healthy  bool
+		Starting bool
+		URL      *url.URL
+	}
+	var resp []appinfo
+	apps := i.prov.List()
+	for _, app := range apps {
+		resp = append(resp, appinfo{
+			Name:     app.ID(),
+			Instance: app.Instance(),
+			Healthy:  app.Available(),
+			Starting: app.Starting(),
+			URL:      app.Addr(),
+		})
+	}
+	RespJSON(w, R{"debug": true, "apps": resp})
 }
 
 func (i *IngressProxy) Run(stop chan struct{}) error {
@@ -147,4 +175,10 @@ func (i *IngressProxy) Run(stop chan struct{}) error {
 		return nil
 	}
 	return i.httpserver.ListenAndServe()
+}
+
+func (i *IngressProxy) Stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
+	defer cancel()
+	return i.httpserver.Shutdown(ctx)
 }

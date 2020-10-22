@@ -3,6 +3,7 @@ package main
 import (
 	"demoless/ingress"
 	"demoless/provider"
+	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,9 +14,10 @@ import (
 )
 
 var (
-	port  = pflag.IntP("port", "p", 8080, "ingress listen port")
-	prov  = pflag.String("provider", "docker", "backend service provider: docker/kubernetes")
-	level = pflag.IntP("level", "v", 4, "logging level 4-info 5-debug")
+	port   = pflag.IntP("port", "p", 8080, "ingress listen port")
+	prov   = pflag.String("provider", "docker", "backend service provider: docker/kubernetes")
+	level  = pflag.IntP("level", "v", 4, "logging level 4-info 5-debug")
+	timout = pflag.Duration("timeout", 30*time.Second, "scale from zero request timeout")
 )
 
 func init() {
@@ -28,8 +30,9 @@ func init() {
 }
 
 func main() {
+	rand.Seed(time.Now().Unix())
 	// 初始化 ingress 实例
-	i, err := ingress.NewIngress(*port, provider.ProviderType(*prov))
+	i, err := ingress.NewIngress(*port, *timout, provider.ProviderType(*prov))
 	if err != nil {
 		logrus.Fatalf("create ingress proxy with err: %v", err)
 	}
@@ -40,8 +43,11 @@ func main() {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		s := <-c
-		logrus.Infof("gracefully shutdown: %v", s)
+		logrus.Infof("receive signal: %v, gracefully shutdown", s)
 		close(stopCh)
+		if err := i.Stop(); err != nil {
+			logrus.Warnf("shutdown http server with error: %v", err)
+		}
 		<-c
 		logrus.Fatal("force exit with code 1")
 	}()

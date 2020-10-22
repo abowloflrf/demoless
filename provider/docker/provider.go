@@ -154,10 +154,6 @@ func NewDockerProvider(host string) provider.Provider {
 		client:   c,
 		backends: make(map[string]*DockerBackend),
 	}
-	stop := make(chan struct{})
-	if err := dp.ServiceDiscovery(stop); err != nil {
-		logrus.Errorf("docker service discovery with error: %v", err)
-	}
 	return dp
 }
 
@@ -183,6 +179,13 @@ func (dp *DockerProvider) Find(id string) (provider.Backend, error) {
 		}
 	}
 	return nil, fmt.Errorf("backend %s not found", id)
+}
+
+func (dp *DockerProvider) List() (list []provider.Backend) {
+	for _, b := range dp.backends {
+		list = append(list, b)
+	}
+	return
 }
 
 func (dp *DockerProvider) ServiceDiscovery(stop chan struct{}) error {

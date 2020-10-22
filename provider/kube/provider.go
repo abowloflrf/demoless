@@ -1,7 +1,6 @@
 package kube
 
 import (
-	"context"
 	"demoless/provider"
 	"errors"
 	"fmt"
@@ -14,8 +13,6 @@ import (
 	"github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	appsinformers "k8s.io/client-go/informers/apps/v1"
@@ -28,7 +25,6 @@ import (
 )
 
 const (
-	// TODO: 为此类 app 的资源都设置一个 annotation
 	annotationKey = "demoless/app"
 )
 
@@ -51,23 +47,12 @@ type KubeProvider struct {
 	client          kubernetes.Interface
 	informerFactory informers.SharedInformerFactory
 	si              coreinformers.ServiceInformer
-	pi              coreinformers.PodInformer
 	di              appsinformers.DeploymentInformer
+	epi             coreinformers.EndpointsInformer
 
 	namespace         string
 	sycnBackendsQueue workqueue.Interface
 	backends          map[string]*KubeBackend
-}
-
-// KubeBackend k8s 提供后端服务，deployment + service
-type KubeBackend struct {
-	sync.RWMutex
-	cond          *sync.Cond
-	manager       *KubeProvider
-	name          string   // deployment/service name
-	url           *url.URL // parsed service address
-	stateHealthy  bool     // 后端有至少一个 Ready 的 Pod
-	stateStarting bool     // Deployment 下实例数非0，且还没有ready的Pod
 }
 
 func NewKubeProvider(namespace string) provider.Provider {
@@ -81,8 +66,8 @@ func NewKubeProvider(namespace string) provider.Provider {
 		client:            clientset,
 		informerFactory:   informerFactory,
 		si:                informerFactory.Core().V1().Services(),
-		pi:                informerFactory.Core().V1().Pods(),
 		di:                informerFactory.Apps().V1().Deployments(),
+		epi:               informerFactory.Core().V1().Endpoints(),
 		namespace:         namespace,
 		backends:          make(map[string]*KubeBackend),
 		sycnBackendsQueue: workqueue.New(),
@@ -98,10 +83,15 @@ func (kp *KubeProvider) Run(stop chan struct{}) error {
 	logrus.Info("starting informer")
 	now := time.Now()
 	go kp.si.Informer().Run(stop)
-	go kp.pi.Informer().Run(stop)
 	go kp.di.Informer().Run(stop)
+	go kp.epi.Informer().Run(stop)
 	logrus.Info("wait for informer cache sync")
-	if !cache.WaitForCacheSync(stop, kp.si.Informer().HasSynced, kp.pi.Informer().HasSynced, kp.di.Informer().HasSynced) {
+
+	if !cache.WaitForCacheSync(stop,
+		kp.si.Informer().HasSynced,
+		kp.di.Informer().HasSynced,
+		kp.epi.Informer().HasSynced,
+	) {
 		return errors.New("failed to sync informer cache")
 	}
 	logrus.Infof("informer cache synced, duration: %v", time.Since(now))
@@ -121,21 +111,20 @@ func (kp *KubeProvider) Find(id string) (provider.Backend, error) {
 	return be, nil
 }
 
-func (kp *KubeProvider) ServiceDiscovery(stop chan struct{}) error {
-	// TODO: 自动发现后端服务列表，目前写死一个
-	// init
-	apps := []string{"demoapp"}
-	for _, app := range apps {
-		if err := kp.syncBackend(app); err != nil {
-			logrus.Warnf("sync kubernetes app %s with error: %v", app, err)
-		}
+func (kp *KubeProvider) List() (list []provider.Backend) {
+	for _, b := range kp.backends {
+		list = append(list, b)
 	}
-	// register event handler
+	return
+}
+
+func (kp *KubeProvider) ServiceDiscovery(stop chan struct{}) error {
+	// 自动发现后端服务列表
 	svcHandlerFunc := func(obj interface{}) {
-		service := obj.(corev1.Service)
+		service := obj.(*corev1.Service)
 		app := service.Labels["app"]
 		appAnno := service.Annotations[annotationKey]
-		if app == appAnno && appAnno != "" {
+		if service.Namespace == kp.namespace && app == appAnno && appAnno != "" {
 			kp.sycnBackendsQueue.Add(app)
 		}
 	}
@@ -151,10 +140,10 @@ func (kp *KubeProvider) ServiceDiscovery(stop chan struct{}) error {
 		},
 	})
 	deployHandlerFunc := func(obj interface{}) {
-		deploy := obj.(appsv1.Deployment)
+		deploy := obj.(*appsv1.Deployment)
 		app := deploy.Labels["app"]
 		appAnno := deploy.Annotations[annotationKey]
-		if app == appAnno && appAnno != "" {
+		if deploy.Namespace == kp.namespace && app == appAnno && appAnno != "" {
 			kp.sycnBackendsQueue.Add(app)
 		}
 	}
@@ -169,23 +158,22 @@ func (kp *KubeProvider) ServiceDiscovery(stop chan struct{}) error {
 			deployHandlerFunc(obj)
 		},
 	})
-	podHandlerFunc := func(obj interface{}) {
-		pod := obj.(corev1.Pod)
-		app := pod.Labels["app"]
-		appAnno := pod.Annotations[annotationKey]
-		if app == appAnno && appAnno != "" {
+	endpointsHandlerFunc := func(obj interface{}) {
+		endpoints := obj.(*corev1.Endpoints)
+		app := endpoints.Labels["app"]
+		if endpoints.Namespace == kp.namespace && app != "" {
 			kp.sycnBackendsQueue.Add(app)
 		}
 	}
-	kp.pi.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	kp.epi.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			podHandlerFunc(obj)
+			endpointsHandlerFunc(obj)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			podHandlerFunc(newObj)
+			endpointsHandlerFunc(newObj)
 		},
 		DeleteFunc: func(obj interface{}) {
-			podHandlerFunc(obj)
+			endpointsHandlerFunc(obj)
 		},
 	})
 	logrus.Infof("start k8s sd workers")
@@ -198,7 +186,6 @@ func (kp *KubeProvider) ServiceDiscovery(stop chan struct{}) error {
 
 	<-stop
 	logrus.Infof("shutting down k8s sd workers")
-
 	return nil
 }
 
@@ -221,9 +208,10 @@ func (kp *KubeProvider) processSyncItem() bool {
 // 每次pod/service/deployment资源变化都会执行此方法
 func (kp *KubeProvider) syncBackend(app string) error {
 	now := time.Now()
+	logrus.Infof("sync app: start sycning %s", app)
 	defer func() {
-		logrus.Infof("sync app %s, duration %v", app, time.Since(now))
-		if be, ok := kp.backends[app]; ok {
+		logrus.Infof("sync app: complete %s, duration %v", app, time.Since(now))
+		if be, ok := kp.backends[app]; ok && be.Available() {
 			be.cond.Broadcast()
 		}
 	}()
@@ -241,27 +229,17 @@ func (kp *KubeProvider) syncBackend(app string) error {
 		stateStarting = false
 		stateHealthy = false
 	}
-	// check pods
-	pods, err := kp.pi.Lister().Pods(kp.namespace).List(labels.SelectorFromSet(map[string]string{"app": app}))
+	// check endpoints
+	ep, err := kp.epi.Lister().Endpoints(kp.namespace).Get(app)
 	if err != nil {
-		logrus.Warnf("get gets %s error, %v", app, err)
+		logrus.Warnf("get endpointes %s error, %v", app, err)
 		kp.removeBackend(app)
 		return err
 	}
-	for _, pod := range pods {
-		ready := false
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-				ready = true
-				break
-			}
-		}
-		if ready {
-			stateHealthy = true
-			break
-		}
-	}
-	if len(pods) != 0 && !stateHealthy {
+	if len(ep.Subsets) != 0 {
+		stateHealthy = true
+	} else if len(ep.Subsets) == 0 && *deployment.Spec.Replicas != 0 {
+		stateHealthy = false
 		stateStarting = true
 	}
 
@@ -273,7 +251,12 @@ func (kp *KubeProvider) syncBackend(app string) error {
 		return err
 	}
 	// 直接请求 Service Name
-	u, err := url.Parse("http://" + service.Name)
+	if len(service.Spec.Ports) == 0 {
+		logrus.Warnf("service %s has no port", app)
+		kp.removeBackend(app)
+		return fmt.Errorf("service %s has no port", app)
+	}
+	u, err := url.Parse(fmt.Sprintf("http://%s:%d", service.Name, service.Spec.Ports[0].Port))
 	if err != nil {
 		logrus.Warnf("parse service %s IP err: %v", app, err)
 		kp.removeBackend(app)
@@ -281,25 +264,41 @@ func (kp *KubeProvider) syncBackend(app string) error {
 	}
 	parsedURL = u
 
+	var eps []*url.URL
+	for _, e := range ep.Subsets {
+		if len(e.Addresses) > 0 && len(e.Ports) > 0 {
+			urlStr := fmt.Sprintf("http://%s:%d", e.Addresses[0].IP, e.Ports[0].Port)
+			u, err := url.Parse(urlStr)
+			if err != nil {
+				logrus.Warnf("parse url %s with error: %v", urlStr, err)
+				continue
+			}
+			eps = append(eps, u)
+		}
+	}
 	// update kp.backends
 	kp.Lock()
 	defer kp.Unlock()
 	_, ok := kp.backends[app]
 	if !ok {
 		// new backend
+		logrus.Infof("sync app: new app %s", app)
 		kp.backends[app] = &KubeBackend{
 			RWMutex:       sync.RWMutex{},
 			cond:          sync.NewCond(&sync.Mutex{}),
 			manager:       kp,
 			name:          app,
 			url:           parsedURL,
+			eps:           eps,
 			stateHealthy:  stateHealthy,
 			stateStarting: stateStarting,
 		}
 	} else {
 		// update existing backend
+		logrus.Infof("sync app: update app %s", app)
 		kp.backends[app].name = app
 		kp.backends[app].url = parsedURL
+		kp.backends[app].eps = eps
 		kp.backends[app].stateHealthy = stateHealthy
 		kp.backends[app].stateStarting = stateStarting
 	}
@@ -310,85 +309,4 @@ func (kp *KubeProvider) removeBackend(app string) {
 	kp.Lock()
 	defer kp.Unlock()
 	delete(kp.backends, app)
-}
-
-func (kb *KubeBackend) ID() string {
-	return kb.name
-}
-
-func (kb *KubeBackend) Addr() *url.URL {
-	return kb.url
-}
-
-func (kb *KubeBackend) Available() bool {
-	kb.RLock()
-	defer kb.RUnlock()
-	return kb.stateHealthy
-}
-
-// Instance 返回其关联 Deployment 的副本数量
-func (kb *KubeBackend) Instance() int {
-	deployment, err := kb.manager.di.Lister().Deployments(kb.manager.namespace).Get(kb.ID())
-	if err != nil {
-		if err := kb.manager.syncBackend(kb.ID()); err != nil {
-			logrus.Warnf("sycn app with error: %v", err)
-		}
-		return 0
-	}
-	return deployment.Size()
-}
-
-// Unfreeze 设置目标 deployment 副本数为 1
-func (kb *KubeBackend) Unfreeze() error {
-	deployment, err := kb.manager.di.Lister().Deployments(kb.manager.namespace).Get(kb.ID())
-	if err != nil {
-		if err := kb.manager.syncBackend(kb.ID()); err != nil {
-			logrus.Warnf("sycn app with error: %v", err)
-		}
-		return err
-	}
-	if deployment.Size() != 0 {
-		return nil
-	}
-	var targetReplica int32 = 1
-	deployment.Spec.Replicas = &targetReplica
-	_, err = kb.manager.client.AppsV1().Deployments(kb.manager.namespace).
-		Update(context.Background(), deployment, metav1.UpdateOptions{})
-	if err != nil {
-		return err
-	}
-
-	kb.Lock()
-	kb.stateStarting = true
-	kb.stateHealthy = false
-	kb.Unlock()
-	return nil
-}
-
-func (kb *KubeBackend) Starting() bool {
-	kb.RLock()
-	defer kb.RUnlock()
-	return kb.stateStarting
-}
-
-func (kb *KubeBackend) WaitForAvailable(timeout time.Duration) error {
-	if kb.Available() {
-		return nil
-	}
-	done := make(chan struct{})
-	go func() {
-		kb.cond.Wait()
-		close(done)
-	}()
-	for {
-		select {
-		case <-time.After(timeout):
-			logrus.Warnf("waiting for backend %s available timeout", kb.ID())
-			return fmt.Errorf("wait %s timeout", kb.ID())
-		case <-done:
-			if kb != nil && kb.Available() {
-				return nil
-			}
-		}
-	}
 }
