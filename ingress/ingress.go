@@ -104,7 +104,6 @@ func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
 		RespErr(w, fmt.Sprintf("service not found: %v", err), http.StatusNotFound)
 		return
 	}
-	time.Sleep(100 * time.Millisecond)
 	if !be.Available() {
 		now := time.Now()
 		// 且未触发解冻，即后端可用实例数为0，准备冷启动

@@ -18,7 +18,6 @@ type DockerProvider struct {
 	sync.Mutex
 	client   *client.Client
 	backends map[string]*DockerBackend
-	stop     chan struct{}
 }
 
 // DockerBackend docker 提供后端服务，单实例
@@ -71,10 +70,9 @@ func (d *DockerBackend) Unfreeze() error {
 		if client.IsErrNotFound(err) {
 			logrus.Warnf("container not found: %v", err)
 			return err
-		} else {
-			logrus.Errorf("inspect container err: %v", err)
-			return err
 		}
+		logrus.Errorf("inspect container err: %v", err)
+		return err
 	}
 	logrus.Debugf("Container State: %+v", c.State)
 	logrus.Debugf("Container Health: %+v", *c.State.Health)
