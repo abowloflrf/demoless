@@ -2,7 +2,6 @@ package ingress
 
 import (
 	"context"
-	"demoless/metrics"
 	"demoless/provider"
 	"demoless/provider/docker"
 	"demoless/provider/kube"
@@ -29,8 +28,6 @@ type IngressProxy struct {
 	port       int
 	timout     time.Duration
 	prov       provider.Provider
-
-	promMetrics *metrics.MetricsStorage
 }
 
 func NewIngress(port int, timeout time.Duration, prov provider.ProviderType) (*IngressProxy, error) {
@@ -81,7 +78,6 @@ func NewIngress(port int, timeout time.Duration, prov provider.ProviderType) (*I
 			IdleTimeout:  time.Second * 60,
 			Handler:      handler,
 		},
-		promMetrics: metrics.New(),
 	}
 
 	// 注册路由
@@ -102,7 +98,6 @@ func (i *IngressProxy) registerRoutes() {
 }
 
 func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
 	app := mux.Vars(r)["app"]
 	be, err := i.prov.Find(app)
 	if err != nil {
@@ -110,7 +105,6 @@ func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	time.Sleep(100 * time.Millisecond)
-	i.promMetrics.HTTPRequestCount.WithLabelValues(app).Inc()
 	if !be.Available() {
 		now := time.Now()
 		// 且未触发解冻，即后端可用实例数为0，准备冷启动
@@ -131,9 +125,6 @@ func (i *IngressProxy) MainHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(be.Addr())
 	proxy.ServeHTTP(w, r)
-
-	elapsed := (float64)(time.Since(start) / time.Millisecond)
-	i.promMetrics.HTTPRequestMilliseconds.WithLabelValues(app).Observe(elapsed)
 }
 
 func (i *IngressProxy) IngressIndexHandler(w http.ResponseWriter, r *http.Request) {
